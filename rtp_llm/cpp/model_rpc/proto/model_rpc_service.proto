@@ -1,0 +1,1046 @@
+// message.proto
+syntax = "proto3";
+import "google/protobuf/wrappers.proto";
+
+message TensorPB {
+    enum DataType {
+        FP32 = 0;
+        INT32 = 1;
+        FP16 = 2;
+        BF16 = 3;
+    }
+    DataType data_type = 1;
+    repeated int64 shape = 2;
+    bytes fp32_data = 3;
+    bytes int32_data = 4;
+    bytes fp16_data = 5;
+    bytes bf16_data = 6;
+}
+
+message IntVector {
+    repeated int32 values = 1;
+}
+
+message IntMatrix {
+    repeated IntVector rows = 1;
+}
+
+message RoleAddrPB {
+    enum RoleType {
+        PDFUSION = 0;
+        PREFILL = 1;
+        DECODE = 2;
+        VIT = 3;
+        FRONTEND = 4;
+    }
+    RoleType role = 1;
+    string ip = 2;
+    int32 http_port = 3;
+    int32 grpc_port = 4;
+}
+
+message GenerateConfigPB {
+    int32 max_new_tokens = 1;
+    int32 num_beams = 2;
+    int32 num_return_sequences = 3;
+    int32 min_new_tokens = 4;
+
+    int32 top_k = 5;
+    float top_p = 6;
+    float temperature = 7;
+    float repetition_penalty = 8;
+    google.protobuf.Int32Value no_repeat_ngram_size = 9;
+    google.protobuf.Int64Value random_seed = 10;
+    google.protobuf.FloatValue top_p_decay = 11;
+    google.protobuf.FloatValue top_p_min = 12;
+    google.protobuf.Int32Value top_p_reset_ids = 13;
+    google.protobuf.StringValue task_id = 14;
+    int32 calculate_loss = 15;
+    bool return_incremental = 16;
+    bool return_hidden_states = 17;
+    bool return_logits = 18;
+    bool is_streaming = 19;
+    int32 timeout_ms = 20;
+    IntMatrix stop_words_list = 21;
+    repeated int32 select_tokens_id = 22;
+    google.protobuf.StringValue adapter_name = 23;
+    bool sp_edit = 24;
+    repeated int32 sp_advice_prompt_token_ids = 25;
+    bool force_disable_sp_run = 26;
+    bool return_all_probs = 27;
+    bool sp_input_lookup = 28;
+    bool can_use_pd_separation = 29;
+    bool return_softmax_probs = 30;
+    bool return_cum_log_probs = 31;
+    bool in_think_mode = 32;
+    int32 max_thinking_tokens = 33;
+    repeated int32 end_think_token_ids = 34;
+    bool gen_timeline = 35;
+    int32 global_request_id = 36;
+    bool force_sp_accept = 37;
+    int32 hidden_states_cut_dim = 38;
+    bool normalized_hidden_states = 39;
+    int32 profile_step = 40;
+    repeated RoleAddrPB role_addrs = 41;
+    reserved 42;
+    reserved "inter_request_id";
+    bool ignore_eos = 43;
+    float presence_penalty = 44;
+    float frequency_penalty = 45;
+    bool do_sample = 46;
+    bool reuse_cache = 47;
+    repeated int32 variable_num_beams = 48;
+    google.protobuf.StringValue trace_id = 49;
+    bool return_all_hidden_states = 50;
+    bool enable_memory_cache = 51;
+    bool enable_device_cache = 52;
+    bool enable_remote_cache = 53;
+    string unique_key = 54;
+    google.protobuf.Int32Value force_batch = 55;
+    google.protobuf.Int32Value batch_group_timeout = 56;
+    string profile_trace_name = 57;
+    // 生成式推荐：组合 token 粒度去重与曝光过滤
+    int32 combo_token_size = 58;
+    IntMatrix banned_combo_token_ids = 59;
+}
+
+message MMPreprocessConfigPB {
+    int32 width = 1;
+    int32 height = 2;
+    int32 min_pixels = 3;
+    int32 max_pixels = 4;
+    int32 fps = 5;
+    int32 min_frames = 6;
+    int32 max_frames = 7;
+}
+
+message MultimodalInputPB {
+    string multimodal_url = 1;
+    int32 multimodal_type = 2;
+    TensorPB multimodal_tensor = 3;
+    MMPreprocessConfigPB mm_preprocess_config = 4;
+}
+
+message MultimodalInputsPB {
+    repeated MultimodalInputPB multimodal_inputs = 1;
+}
+
+message MultimodalOutputPB {
+    TensorPB multimodal_embedding = 1;
+    TensorPB multimodal_pos_id = 2;
+}
+
+message MultimodalOutputsPB {
+    repeated MultimodalOutputPB multimodal_outputs = 1;
+}
+
+message GenerateInputPB {
+    string prefix_cache_attempt = 9;
+    int64 request_id = 1;
+    repeated int32 token_ids = 2;
+    repeated MultimodalInputPB multimodal_inputs = 3;
+    GenerateConfigPB generate_config = 4;
+    string client_id = 5;
+    int64 start_time = 6;
+    int32 batch_group_size = 7;
+    google.protobuf.Int64Value batch_group_id = 8;
+}
+
+message AuxInfoPB {
+    int32 cost_time_us = 1;
+    int32 iter_count = 2;
+    int32 input_len = 3;
+    int32 total_reuse_len = 4;
+    int32 prefix_len = 5;
+    int32 output_len = 6;
+    TensorPB cum_log_probs = 9;
+    int32 step_output_len = 10;
+    bool pd_sep = 11;
+    int32 first_token_cost_time_us = 12;
+    TensorPB softmax_probs = 13;
+    int32 wait_time_us = 14;
+
+    int32 local_reuse_len = 15;
+    int32 remote_reuse_len = 16;
+    int32 prefill_total_reuse_len = 17;
+    int32 prefill_local_reuse_len = 18;
+    int32 prefill_remote_reuse_len = 19;
+    int32 decode_total_reuse_len = 20;
+    int32 decode_local_reuse_len = 21;
+    int32 decode_remote_reuse_len = 22;
+    string aux_string = 23;
+    int32 memory_reuse_len = 24;
+    int32 prefill_memory_reuse_len = 25;
+    int32 decode_memory_reuse_len = 26;
+}
+
+message FlattenOutputPB {
+    repeated bool finished = 1;
+    repeated AuxInfoPB aux_info = 2;
+    TensorPB output_ids = 3;
+    TensorPB hidden_states = 4;
+    TensorPB loss = 5;
+    TensorPB logits = 6;
+    TensorPB all_probs = 7;
+    TensorPB all_hidden_states = 8;
+}
+
+message GenerateOutputsPB {
+    int64 request_id = 1;
+    FlattenOutputPB flatten_output = 2;
+    int64 receive_load_time = 3;
+    int64 start_load_time = 4;
+    int64 receive_generate_time = 5;
+    int64 load_done_time = 6;
+    int64 begin_compute_time = 7;
+    int64 compute_done_time = 8;
+    RpcErrorPB error_info = 9;
+}
+
+// return to python client
+message ErrorDetailsPB {
+    int64 error_code = 1;
+    string error_message = 2;
+}
+
+enum ErrorCodePB {
+    NONE_ERROR = 0;
+    UNKNOWN_ERROR = 1;
+    CANCELLED = 2;
+    LOAD_CACHE_TIMEOUT = 3;
+    CACHE_STORE_LOAD_CONNECT_FAILED = 4;
+    CACHE_STORE_LOAD_SEND_REQUEST_FAILED = 5;
+    CACHE_STORE_CALL_PREFILL_TIMEOUT = 6;
+    CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 7;
+    CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 8;
+    CACHE_STORE_LOAD_BUFFER_TIMEOUT = 9;
+    P2P_CONNECTOR_CALL_PREFILL_FAILED = 10;
+    P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED = 11;
+    P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED = 12;
+    P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED = 13;
+    P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED = 14;
+    P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED = 15;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT = 16;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED = 17;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED = 18;
+    P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED = 19;
+    P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH = 20;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT = 21;
+    P2P_CONNECTOR_WORKER_READ_FAILED = 22;
+    P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
+    P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
+    P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+}
+
+// transfer between prefill and decode
+message RpcErrorPB {
+    ErrorCodePB error_code = 1;
+    string error_message = 2;
+}
+
+message EmptyPB {}
+
+enum RemoteStage {
+    ALLOCATE = 0;
+    LOAD = 1;
+    GENERATE = 2;
+}
+
+message GenerateRequestPB {
+    RemoteStage stage = 1;
+    int64 request_id = 2;
+    string client_id = 3;
+    int64 start_time = 4;
+    int32 first_generate_token_id = 5;
+    GenerateInputPB input = 6;
+    repeated string peer_addrs = 7;
+    repeated int32 propose_token_ids = 8;
+    repeated int32 position_ids = 9;
+    TensorPB propose_probs = 10;
+    TensorPB propose_hidden = 11;
+}
+
+// in tp case, decode master broadcast to decode worker
+message BroadcastLoadRequestPB {
+    int64 request_id = 1;
+    string request_key = 2;
+    repeated string peer_addrs = 3;
+    repeated int64 cache_keys = 4;
+    repeated int32 block_ids = 5;
+    int64 block_num = 6;
+    int64 reuse_block_size = 7;
+    int64 timeout_ms = 8;
+    int64 dp_rank = 9;
+    int32 partition_count = 10;
+    int32 partition_id = 11;
+    repeated IntVector group_block_ids = 12;
+
+}
+
+message BroadcastLoadResponsePB {
+    RpcErrorPB error_info = 1;
+    int64 done_time_us = 2;
+}
+
+message RemoteFinishRequestPB {
+    int64 request_id = 1;
+}
+
+message RemoteGenerateRequestPBNew {
+    GenerateInputPB input = 1;
+    string client_id = 2;
+    int64 start_time_us = 3;
+    repeated string addrs = 4;
+    repeated int32 block_ids = 5;
+    int64 reuse_block_size = 6;
+    string mtp_hidden_states_key = 7;
+    bool use_mla = 8;
+    int32 layer_num = 9;
+    int64 deadline_us = 10;
+}
+
+message RemoteGenerateResponsePBNew {
+    ErrorDetailsPB error_info = 1;
+    GenerateOutputsPB output = 2;
+    int32 first_generate_token_id = 3;
+    int64 first_token_rt_us = 4;
+    bool finished = 5;
+}
+
+message RemoteStorePartition {
+    string remote_addr = 1;
+    int32 remote_partition_id = 2;
+    int32 remote_partition_count = 3;
+    int32 local_partition_id = 4;
+    int32 local_partition_count = 5;
+}
+
+message RemoteStoreRequestPB {
+    int64 dp_rank = 1;
+    int64 request_id = 2;
+    string request_key = 3;
+    repeated int32 decode_block_ids = 4;
+    repeated int32 prefill_block_ids = 5;
+    int64 reuse_block_size = 6;
+    repeated RemoteStorePartition partition_infos = 7;
+    int64 deadline_us = 8;
+    string client_id = 9;
+}
+
+message RemoteStoreResponsePB {
+    RpcErrorPB error_info = 1;
+    int64 done_time_us = 2;
+}
+
+message StatusVersionPB {
+    int64 latest_cache_version = 1;
+    int64 latest_finished_version = 2;
+}
+
+message PrefixInventoryAckPB {
+    string namespace = 1;
+    string worker_id = 2;
+    int32 dp_lane = 3;
+    string epoch = 4;
+    string layout_fingerprint = 5;
+    int64 version = 6;
+    bool device_ready = 7;
+    int32 cp_degree = 8;
+    int32 block_size = 9;
+    int64 rank_readiness_generation = 10;
+}
+
+message CacheVersionPB {
+    int64 latest_cache_version = 1;
+    bool need_cache_keys = 2;
+    PrefixInventoryAckPB prefix_inventory_ack = 3;
+}
+
+message CacheStatusPB {
+    int64 available_kv_cache = 1;
+    int64 total_kv_cache = 2;
+    int64 block_size = 3;
+    int64 version = 4;
+    map<int64, bool> cache_keys = 5;
+    CacheReportV2PB inventory = 6;
+    PrefixTopologyIdentityPB topology_identity = 7;
+    PrefixTopologyReceiptPB topology_receipt = 8;
+}
+
+message PrefixTopologyReceiptPB {
+    PrefixControllerPB controller = 1;
+    string binding = 2;
+    enum State {
+        UNKNOWN = 0;
+        ACTIVE = 1;
+        CANCELLED = 2;
+        RELEASED = 3;
+        QUARANTINED = 4;
+        CONFIRMED = 5;
+    }
+    State state = 3;
+}
+
+message PrefixTopologyIdentityPB {
+    string boot_id = 1;
+    int64 world_rank = 2;
+    int64 world_size = 3;
+}
+
+message PrefixReuseEventPB {
+    string attempt_id = 6;
+    int64 sequence = 1;
+    int64 request_id = 2;
+    int64 device_reuse_tokens = 3;
+    int64 input_tokens = 4;
+    bool prefill = 5;
+}
+
+message PrefixCopyRecordPB {
+    uint64 generation = 1;
+    uint64 operation_id = 2;
+    uint64 import_epoch = 3;
+    uint64 cache_key = 4;
+    int32 block_index = 5;
+    int64 published_ns = 6;
+    int64 first_reuse_ns = 7;
+    int64 evicted_ns = 8;
+    int64 physical_free_ns = 9;
+    int64 first_request_id = 10;
+    string first_attempt_id = 11;
+    bool reused = 12;
+    bool evicted = 13;
+    bool physically_freed = 14;
+    bool retired = 15;
+    bool tracking_valid = 16;
+    uint64 pending_executions = 17;
+}
+
+message PrefixCopySnapshotPB {
+    bool valid = 1;
+    int64 sampled_ns = 2;
+    uint64 published_blocks = 3;
+    uint64 reused_blocks = 4;
+    uint64 wasted_blocks = 5;
+    uint64 unknown_retired_blocks = 6;
+    uint64 dropped_terminal_records = 7;
+    bool counters_saturated = 8;
+    repeated PrefixCopyRecordPB records = 9;
+}
+
+message CacheReportV2PB {
+    string namespace = 1;
+    string worker_id = 2;
+    int32 dp_lane = 3;
+    string epoch = 4;
+    string layout_fingerprint = 5;
+    string snapshot_kind = 6;
+    int64 version = 7;
+    int64 base_version = 8;
+    int64 rank_readiness_generation = 9;
+    bool device_ready = 10;
+    int32 cp_degree = 11;
+    int32 block_size = 12;
+    int64 physical_free_bytes = 13;
+    repeated int64 device_keys = 14;
+    repeated PrefixReuseEventPB reuse_events = 15;
+    int64 dropped_reuse_events = 16;
+    int64 physical_block_bytes = 17;
+    int64 evictable_bytes = 18;
+    int64 active_bytes = 19;
+    int64 resident_bytes = 20;
+    int64 operation_reserved_bytes = 21;
+    bool physical_memory_stats_valid = 22;
+    int64 physical_capacity_bytes = 23;
+    PrefixCopySnapshotPB copy_lifetime = 24;
+}
+
+message PrefixCacheCapabilitiesRequestPB {}
+
+message PrefixRopeLayoutPB {
+    int32 style = 1;
+    int32 dim = 2;
+    int32 base = 3;
+    float scale = 4;
+    float factor1 = 5;
+    float factor2 = 6;
+    int32 max_pos = 7;
+    float extrapolation_factor = 8;
+    float mscale = 9;
+    int32 offset = 10;
+    int32 index_factor = 11;
+    int32 mrope_dim1 = 12;
+    int32 mrope_dim2 = 13;
+    int32 mrope_dim3 = 14;
+    bool is_neox_style = 15;
+    bool indexer_is_neox_style = 16;
+}
+
+message PrefixReplicatedLayoutPB {
+    uint32 schema_version = 1;
+    string storage_kind = 2;
+    int32 native_dtype = 3;
+    repeated int32 global_layer_ids = 4;
+    uint64 global_query_heads = 5;
+    uint64 global_kv_heads = 6;
+    uint64 head_dimension = 7;
+    uint64 tokens_per_block = 8;
+    uint64 kernel_tokens_per_block = 9;
+    uint64 kv_bytes_per_layer = 10;
+    uint64 scale_bytes_per_layer = 11;
+    uint64 bytes_per_rank_block = 12;
+    repeated uint64 buffer_bytes = 13;
+    PrefixRopeLayoutPB rope = 14;
+    bool qk_norm = 15;
+    double layernorm_epsilon = 16;
+    int64 position_ids_style = 17;
+    double partial_rotary_factor = 18;
+    float q_scaling = 19;
+    float softmax_extra_scale = 20;
+    bool use_logn_attention = 21;
+    bool causal = 22;
+    bool need_rope_kv_cache = 23;
+    bool fuse_qkv_add_bias = 24;
+    int32 attention_dtype = 25;
+    int32 kv_quantization = 26;
+    int64 max_sequence_length = 27;
+}
+
+message PrefixCacheCapabilitiesResponsePB {
+    string namespace = 1;
+    string layout_fingerprint = 2;
+    int32 cp_degree = 3;
+    int32 dp_lane = 4;
+    int32 tp_size = 5;
+    int32 block_size = 6;
+    bool device_ready = 7;
+    repeated string supported_operations = 8;
+    PrefixReplicatedLayoutPB replicated_layout = 9;
+}
+
+message InspectPrefixRequestPB {
+    string namespace = 1;
+    string epoch = 2;
+    int64 version = 3;
+    repeated int64 cache_keys = 4;
+}
+
+message InspectPrefixResponsePB {
+    bool complete = 1;
+    string epoch = 2;
+    int64 version = 3;
+    repeated int64 present_keys = 4;
+    repeated int64 missing_keys = 5;
+    int64 physical_block_bytes = 6;
+    int64 destination_physical_bytes = 7;
+}
+
+message PrefixControllerPB {
+    string namespace = 1;
+    string controller_id = 2;
+    uint64 term = 3;
+}
+
+message PrefixTransferPB {
+    string transfer_id = 1;
+    string source_worker_id = 2;
+    string destination_worker_id = 3;
+    string source_epoch = 4;
+    string destination_epoch = 5;
+    string source_layout = 6;
+    string destination_layout = 7;
+}
+
+message ActivatePrefixControllerRequestPB {
+    PrefixControllerPB controller = 1;
+    string epoch = 2;
+}
+
+message ActivatePrefixControllerResponsePB {
+    bool success = 1;
+    PrefixControllerPB controller = 2;
+    string epoch = 3;
+}
+
+message PreparePrefixExportRequestPB {
+    string namespace = 1;
+    string epoch = 2;
+    int64 version = 3;
+    repeated int64 cache_keys = 4;
+    string request_id = 5;
+    int64 deadline_unix_ms = 6;
+    PrefixControllerPB controller = 7;
+    PrefixTransferPB transfer = 8;
+}
+
+message PreparePrefixExportResponsePB {
+    uint64 lease_id = 1;
+    string epoch = 2;
+    int64 version = 3;
+    repeated int64 cache_keys = 4;
+    int64 lease_remaining_ms = 5;
+    string request_id = 6;
+    int64 deadline_unix_ms = 7;
+    bool lease_active = 8;
+    PrefixControllerPB controller = 9;
+    PrefixTransferPB transfer = 10;
+    bool supports_missing_only = 11;
+}
+
+message PreparePrefixImportRequestPB {
+    string namespace = 1;
+    string epoch = 2;
+    int64 expected_version = 3;
+    repeated int64 cache_keys = 4;
+    int32 rank_count = 5;
+    uint64 source_lease_id = 6;
+    string request_id = 7;
+    int64 deadline_unix_ms = 8;
+    PrefixControllerPB controller = 9;
+    PrefixTransferPB transfer = 10;
+}
+
+message PreparePrefixImportResponsePB {
+    uint64 operation_id = 1;
+    string epoch = 2;
+    int64 expected_version = 3;
+    repeated int64 cache_keys = 4;
+    uint64 source_lease_id = 5;
+    int64 lease_remaining_ms = 6;
+    string request_id = 7;
+    int64 deadline_unix_ms = 8;
+    int32 state = 9;
+    uint64 committed_version = 10;
+    int32 rank_count = 11;
+    PrefixControllerPB controller = 12;
+    PrefixTransferPB transfer = 13;
+    repeated uint32 missing_indices = 14;
+    bool has_copy_plan = 15;
+}
+
+enum PrefixPrepareKindPB {
+    PREFIX_PREPARE_UNSPECIFIED = 0;
+    PREFIX_PREPARE_EXPORT = 1;
+    PREFIX_PREPARE_IMPORT = 2;
+}
+
+message GetPrefixPrepareRequestPB {
+    string namespace = 1;
+    string epoch = 2;
+    string request_id = 3;
+    PrefixPrepareKindPB kind = 4;
+    PrefixControllerPB controller = 5;
+}
+
+message GetPrefixPrepareResponsePB {
+    oneof result {
+        PreparePrefixExportResponsePB export_result = 1;
+        PreparePrefixImportResponsePB import_result = 2;
+    }
+}
+
+message CommitPrefixImportRequestPB {
+    uint64 operation_id = 1;
+    uint64 lease_id = 2;
+    string epoch = 3;
+    int64 version = 4;
+    PrefixControllerPB controller = 5;
+    PrefixTransferPB transfer = 6;
+}
+
+message PrefixOperationResponsePB {
+    bool success = 1;
+    int64 version = 2;
+    string message = 3;
+}
+
+message AbortPrefixOperationRequestPB {
+    uint64 operation_id = 1;
+    string epoch = 2;
+    PrefixControllerPB controller = 3;
+    PrefixTransferPB transfer = 4;
+}
+
+message ReleasePrefixExportRequestPB {
+    uint64 lease_id = 1;
+    string epoch = 2;
+    PrefixControllerPB controller = 3;
+    PrefixTransferPB transfer = 4;
+}
+
+message GetPrefixOperationRequestPB {
+    uint64 operation_id = 1;
+    string epoch = 2;
+    PrefixControllerPB controller = 3;
+}
+
+message MarkPrefixRankReadyRequestPB {
+    uint64 operation_id = 1;
+    string epoch = 2;
+    int32 rank = 3;
+    PrefixControllerPB controller = 4;
+    PrefixTransferPB transfer = 5;
+}
+
+message GetPrefixOperationResponsePB {
+    uint64 operation_id = 1;
+    string epoch = 2;
+    int64 expected_version = 3;
+    int32 state = 4;
+    repeated int64 cache_keys = 5;
+    uint64 committed_version = 6;
+    uint64 source_lease_id = 7;
+    PrefixControllerPB controller = 8;
+    PrefixTransferPB transfer = 9;
+    repeated uint32 missing_indices = 10;
+    bool has_copy_plan = 11;
+}
+
+message ReclaimPrefixRequestPB {
+    string namespace = 1;
+    string epoch = 2;
+    int64 expected_version = 3;
+    repeated int64 cache_keys = 4;
+    PrefixControllerPB controller = 5;
+}
+
+message PrefixTransferEndpointRequestPB {
+    uint64 operation_id = 1;
+    uint64 lease_id = 2;
+    string epoch = 3;
+    string peer_ip = 4;
+    uint32 peer_port = 5;
+    int64 timeout_ms = 6;
+    PrefixControllerPB controller = 7;
+    PrefixTransferPB transfer = 8;
+    repeated uint32 missing_indices = 9;
+    bool has_copy_plan = 10;
+}
+
+message UpdateSchedulerInfoRequestPB {
+    string scheduler_info = 1;
+}
+
+message SetLogLevelRequestPB {
+    string log_level = 1;
+}
+
+message StartProfileRequestPB {
+    string trace_name = 1;
+    int32 start_step = 2;
+    int32 num_steps = 3;
+    bool enable_all_rank = 4;
+}
+
+message StartProfileInternalRequestPB {
+    string trace_name = 1;
+    int32 start_step = 2;
+    int32 num_steps = 3;
+}
+
+message CheckHealthResponsePB {
+    string health = 1;
+}
+
+message UpdateEplbConfigRequestPB {
+    string mode = 1;
+    int32 update_time = 2;
+}
+
+enum TaskPhase {
+    TASK_PHASE_PENDING = 0;
+    TASK_PHASE_RECEIVED = 1;
+    TASK_PHASE_KV_ALLOCATED = 2;
+    TASK_PHASE_RUNNING = 3;
+}
+
+message TaskInfoPB {
+    int64 request_id = 1;
+    reserved 2;
+    reserved "inter_request_id";
+    int64 prefix_length = 3;
+    int64 input_length = 4;
+    int64 waiting_time_ms = 5;
+    int64 iterate_count = 6;
+    int64 end_time_ms = 7;
+    int64 dp_rank = 8;
+    bool is_waiting = 9;
+    ErrorDetailsPB error_info = 10;
+    int64 batch_id = 11;
+    TaskPhase phase = 12;
+    int64 execution_time_ms = 13;
+}
+
+message UpdateWeightsRequestPB {
+    string name = 1;
+    string desc = 2;
+    string method = 3;
+}
+
+message WorkerStatusPB {
+    string role = 1;
+    int32 available_concurrency = 2;
+    repeated TaskInfoPB running_task_info = 3;
+    repeated TaskInfoPB finished_task_list = 4;
+    int32 waiting_query_len = 5;
+    int32 running_query_len = 6;
+    double step_latency_ms = 7;
+    int32 iterate_count = 8;
+    int32 dp_size = 9;
+    int32 tp_size = 10;
+    int64 status_version = 12;
+    bool alive = 13;
+    string precision = 14;
+    int64 latest_finished_version = 15;
+}
+
+message EmbeddingInputPB {
+    repeated int32 token_ids = 1;
+    repeated int32 token_type_ids = 2;
+    repeated int32 input_lengths = 3;
+    int64 request_id = 4;
+    repeated MultimodalInputPB multimodal_features = 5;
+}
+
+message EmbeddingHealthRequestPB {
+    int64 request_id = 1;
+}
+
+message EmbeddingTensorMapPB {
+    map<string, TensorPB> tensor_map = 1;
+}
+
+message EmbeddingOutputPB {
+    bool output_is_tensor = 1;
+    TensorPB output_t = 2;
+    repeated EmbeddingTensorMapPB output_map = 3;
+}
+
+service EmbeddingRpcService {
+    rpc embedding(EmbeddingInputPB) returns (EmbeddingOutputPB);
+    rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
+}
+
+message MemoryOperationRequestPB {
+    message CopyItem {
+        int32 mem_block = 1;
+        repeated int32 gpu_blocks = 2;
+    }
+    enum CopyDirection {
+        H2D = 0;
+        D2H = 1;
+    }
+    repeated CopyItem copy_items = 1;
+    CopyDirection copy_direction = 2;
+}
+
+message MemoryOperationResponsePB {
+    bool success = 1;
+}
+
+message TPWorkerInfoPB {
+    string ip = 1;
+    int32 cache_store_port = 2;
+}
+
+message LayerCacheBlockPB {
+    uint32 layer_id = 1;
+    repeated int64 cache_keys = 2;
+    repeated uint32 block_ids = 3;
+}
+
+enum P2PConnectorBroadcastType {
+    READ = 0;
+    HANDLE_READ = 1;
+    CANCEL_READ = 2;
+    CANCEL_HANDLE_READ = 3;
+}
+
+message P2PConnectorBroadcastTpRequestPB {
+    repeated LayerCacheBlockPB layer_blocks = 1;
+    repeated TPWorkerInfoPB peer_workers = 2;
+    string unique_key = 3;
+    int64 request_id = 4;
+    int64 deadline_ms = 5;
+    P2PConnectorBroadcastType type = 6;
+    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill)
+    int32 remote_tp_size = 8;
+}
+
+// GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
+message GetPeerInfoRequestPB {
+    string requester_ip = 1;
+    int32  requester_tp_size = 2;
+}
+
+message GetPeerInfoResponsePB {
+    int32  tp_size = 1;
+}
+
+message P2PConnectorBroadcastTpResponsePB {
+    ErrorCodePB error_code = 1;
+    string error_message = 2;
+}
+
+message P2PConnectorStartLoadRequestPB {
+    string unique_key = 1;
+    repeated TPWorkerInfoPB workers = 2;
+    int64 deadline_ms = 3;
+}
+
+// Side-channel tensor blob: carries named tensor data between prefill and decode
+message SideChannelTensorPB {
+    TensorPB tensor = 1;
+}
+
+// Side-channel payload: replaces fixed first_token/reuse/SP/position_ids fields
+// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids"
+message SideChannelPayloadPB {
+    map<string, SideChannelTensorPB> tensors = 1;
+    // Scalar fields that don't fit tensor format
+    int64  first_generate_token_id = 2;
+    int32  total_reuse_len         = 3;
+    int32  local_reuse_len         = 4;
+    int32  remote_reuse_len        = 5;
+    int32  memory_reuse_len        = 6;
+}
+
+message P2PConnectorStartLoadResponsePB {
+    // Legacy fixed fields reserved (replaced by SideChannelPayloadPB)
+    reserved 1 to 8;
+    reserved "first_generate_token_id", "total_reuse_len", "local_reuse_len", "remote_reuse_len", "propose_token_ids", "propose_probs", "propose_hidden", "position_ids";
+
+    // Error handling - preserve field numbers 9, 10 for backward compatibility with deployed nodes
+    ErrorCodePB error_code = 9;
+    string error_message = 10;
+
+    // New side-channel payload: all data carried as structured map + scalars
+    // Field number 12+ to avoid conflict with legacy error_code (was field 9 in old proto)
+    SideChannelPayloadPB payload = 12;
+}
+
+enum RemoteOpType {
+    REMOTE_OPERATION_UNSPECIFIED = 0;
+    REMOTE_OPERATION_READ = 1;
+    REMOTE_OPERATION_WRITE = 2;
+}
+
+message RemoteBoolMasksTypePB { repeated bool values = 1; }
+message RemoteBlockMaskPB {
+    oneof info {
+        int32 offset = 1;
+        RemoteBoolMasksTypePB bool_masks = 2;
+    }
+}
+
+message FunctionRequestPB {
+    oneof request {
+        MemoryOperationRequestPB mem_request = 1;
+        RemoteOperationRequestPB remote_request = 2;
+        P2PConnectorBroadcastTpRequestPB p2p_request = 3;
+    }
+}
+
+message RemoteOperationRequestPB {
+    RemoteOpType op = 1;
+    string trace_id = 2;
+    repeated int32 group_ids = 3;
+    repeated int32 block_ids = 4;
+    repeated string uris = 5;
+}
+
+message RemoteOperationResponsePB {
+    RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
+    repeated string actual_uris = 2; // only for write
+}
+
+message FunctionResponsePB {
+    oneof response {
+        MemoryOperationResponsePB mem_response = 1;
+        RemoteOperationResponsePB remote_response = 2;
+        P2PConnectorBroadcastTpResponsePB p2p_response = 3;
+    }
+}
+
+message BatchGenerateInputPB {
+    repeated GenerateInputPB inputs = 1;
+}
+
+message BatchGenerateResultPB {
+    GenerateOutputsPB final_output = 1;
+    RpcErrorPB error_info = 2;
+}
+
+message BatchGenerateOutputsPB {
+    repeated BatchGenerateResultPB results = 1;
+}
+
+enum CancelIfReceivedOutcomePB {
+    CANCEL_IF_RECEIVED_OUTCOME_UNSPECIFIED = 0;
+    CANCEL_IF_RECEIVED_CANCELLED = 1;
+    CANCEL_IF_RECEIVED_NOT_FOUND = 2;
+    CANCEL_IF_RECEIVED_NOT_RECEIVED = 3;
+    CANCEL_IF_RECEIVED_ALREADY_CANCELLED = 4;
+}
+
+message CancelIfReceivedRequestPB {
+    int64 request_id = 1;
+    int64 operation_epoch = 2;
+}
+
+message CancelIfReceivedResponsePB {
+    CancelIfReceivedOutcomePB outcome = 1;
+    TaskPhase observed_phase = 2;
+    int64 accepted_operation_epoch = 3;
+    bool idempotent_replay = 4;
+    string detail = 5;
+}
+
+service RpcService {
+    rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+    rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+    rpc ActivatePrefixController(ActivatePrefixControllerRequestPB) returns (ActivatePrefixControllerResponsePB);
+    rpc GetPrefixCacheCapabilities(PrefixCacheCapabilitiesRequestPB) returns (PrefixCacheCapabilitiesResponsePB);
+    rpc InspectPrefix(InspectPrefixRequestPB) returns (InspectPrefixResponsePB);
+    rpc PreparePrefixExport(PreparePrefixExportRequestPB) returns (PreparePrefixExportResponsePB);
+    rpc PreparePrefixImport(PreparePrefixImportRequestPB) returns (PreparePrefixImportResponsePB);
+    rpc GetPrefixPrepare(GetPrefixPrepareRequestPB) returns (GetPrefixPrepareResponsePB);
+    rpc CommitPrefixImport(CommitPrefixImportRequestPB) returns (PrefixOperationResponsePB);
+    rpc AbortPrefixOperation(AbortPrefixOperationRequestPB) returns (PrefixOperationResponsePB);
+    rpc ReleasePrefixExport(ReleasePrefixExportRequestPB) returns (PrefixOperationResponsePB);
+    rpc GetPrefixOperation(GetPrefixOperationRequestPB) returns (GetPrefixOperationResponsePB);
+    rpc MarkPrefixRankReady(MarkPrefixRankReadyRequestPB) returns (PrefixOperationResponsePB);
+    rpc ReclaimPrefix(ReclaimPrefixRequestPB) returns (PrefixOperationResponsePB);
+    rpc StartPrefixSend(PrefixTransferEndpointRequestPB) returns (PrefixOperationResponsePB);
+    rpc StartPrefixReceive(PrefixTransferEndpointRequestPB) returns (PrefixOperationResponsePB);
+    rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
+    rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
+    rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
+    rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
+    rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
+    rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
+
+    rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
+    rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
+    rpc SetPause(EmptyPB) returns (EmptyPB);
+    rpc SetRestart(EmptyPB) returns (EmptyPB);
+    rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
+    rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
+    rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
+    rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
+
+    rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
+    rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
+    rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
+
+    rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
+    rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
+    rpc CancelIfReceived(CancelIfReceivedRequestPB) returns (CancelIfReceivedResponsePB);
+}
+
+service MultimodalRpcService {
+    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
+    rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+    rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+}

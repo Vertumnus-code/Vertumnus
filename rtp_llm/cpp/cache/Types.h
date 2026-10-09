@@ -1,0 +1,87 @@
+#pragma once
+
+#include <cstddef>
+#include <vector>
+#include <cstdint>
+#include "rtp_llm/cpp/cache/PrefixInventory.h"
+
+#include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+
+namespace rtp_llm {
+
+typedef int32_t          GroupIdType;
+typedef std::vector<int> LayerIdsType;
+
+struct BlockAddrInfo {
+    void* kv_addr       = nullptr;
+    void* kv_scale_addr = nullptr;
+};
+
+struct PrefixTopologyIdentity {
+    std::string boot_id;
+    int64_t     world_rank = -1;
+    int64_t     world_size = 0;
+};
+
+struct KVCacheInfo {
+    PrefixInventoryReport     inventory;
+    size_t                    available_kv_cache = 0;
+    size_t                    total_kv_cache     = 0;
+    size_t                    block_size         = 0;
+    std::vector<CacheKeyType> cached_keys;
+    int64_t                   version = -1;
+};
+
+struct BlockIdPair {
+    BlockIdxType src;
+    BlockIdxType dst;
+};
+
+struct MatchResult {
+    size_t           reuse_length = 0;
+    size_t           reuse_blocks = 0;
+    BlockIndicesType block_indices;
+};
+
+// for p2p connector when TP settings of prefill & decode are different.
+struct KVPartitionBytes {
+    size_t k_off = 0;
+    size_t k_sz  = 0;
+    size_t v_off = 0;
+    size_t v_sz  = 0;
+};
+
+struct MallocInfo {
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+    CompleteTokenIdsPtr     complete_token_ids;
+    int64_t                 request_id          = 0;
+    bool                    verbose             = true;  // for failed log
+    bool                    reuse_cache         = true;
+    bool                    enable_device_cache = true;
+};
+
+struct MallocResult {
+    bool success;
+    int  reuse_len;
+
+    int64_t match_cost_time_us = 0;
+};
+
+struct FreeInfo {
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+    CompleteTokenIdsPtr     complete_token_ids;
+
+    int64_t request_id = 0;
+};
+
+struct InsertInfo {
+    BatchKVCacheResourcePtr batch_kv_cache_resource;
+    CompleteTokenIdsPtr     complete_token_ids;
+    bool                    is_resident;
+};
+
+}  // namespace rtp_llm

@@ -1,0 +1,607 @@
+import asyncio
+import gc
+import json
+import logging
+import socket
+import threading
+import time
+from typing import Any, Dict, List, Optional, Union
+
+from anyio import CapacityLimiter
+from anyio.lowlevel import RunVar
+from fastapi import Body, FastAPI, HTTPException
+from fastapi import Request
+from fastapi import Request as RawRequest
+from fastapi import status
+from fastapi.middleware import Middleware
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import ORJSONResponse
+from typing_extensions import override
+from uvicorn import Config, Server
+from uvicorn.loops.auto import auto_loop_setup
+
+from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.distribute.distributed_server import get_world_info
+from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
+from rtp_llm.openai.api_datatype import (
+    BatchChatCompletionRequest,
+    ChatCompletionRequest,
+)
+from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
+from rtp_llm.utils.parallel_topology import (
+    read_runtime_dp_addresses,
+    runtime_dp_addresses_file,
+    write_runtime_dp_addresses,
+)
+from rtp_llm.utils.prefix_topology_gate import (
+    PrefixTopologyConflict,
+    PrefixTopologyGate,
+    PrefixTopologyMiddleware,
+)
+from rtp_llm.utils.util import AtomicCounter, async_request_server
+from rtp_llm.utils.version_info import VersionInfo
+
+# make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
+MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
+
+active_requests = AtomicCounter()
+server_shutdown = False
+topology_switching = False
+
+
+class GracefulShutdownServer(Server):
+    def set_server(self, frontend_server: FrontendServer):
+        self.frontend_server = frontend_server
+
+    @override
+    async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
+        global server_shutdown
+        server_shutdown = True
+        global active_requests
+        while active_requests.get() > 0:
+            logging.info(f"wait {active_requests.get()} requests finish for 1s")
+            await asyncio.sleep(1)
+        await super().shutdown(sockets)
+
+
+class FrontendApp(object):
+    def __init__(
+        self,
+        py_env_configs: PyEnvConfigs,
+        separated_frontend: bool = False,
+    ):
+        self.server_config = py_env_configs.server_config
+        self.frontend_server = FrontendServer(
+            self.server_config.rank_id,
+            self.server_config.frontend_server_id,
+            py_env_configs,
+        )
+        self.separated_frontend = separated_frontend
+
+        # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
+        engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
+        world_info = get_world_info(
+            server_config=py_env_configs.server_config,
+            distribute_config=py_env_configs.distribute_config,
+            parallelism_config=py_env_configs.parallelism_config,
+        )
+        dp_addresses = get_dp_addrs_from_world_info(
+            world_info=world_info,
+            parallelism_config=engine_config.parallelism_config,
+        )
+        all_rank_addresses = [
+            f"{member.ip}:{member.rpc_server_port}" for member in world_info.members
+        ]
+        self.grpc_client = GrpcClientWrapper(
+            self.server_config.rpc_server_port,
+            dp_addresses=dp_addresses,
+            all_rank_addresses=all_rank_addresses,
+        )
+        self.topology_switch_lock = asyncio.Lock()
+        self.runtime_dp_addresses_file = runtime_dp_addresses_file(
+            self.server_config.server_port
+        )
+        initialize = (
+            PrefixTopologyGate
+            if self.grpc_client.topology_writer is not None
+            else write_runtime_dp_addresses
+        )
+        self.topology_gate = initialize(
+            self.runtime_dp_addresses_file,
+            dp_addresses,
+            engine_config.parallelism_config.tp_size,
+            engine_config.parallelism_config.dp_size,
+        )
+
+        logging.info(
+            f"frontend app rank_id = {self.server_config.rank_id}, "
+            f"server_port = {self.server_config.server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
+        )
+
+    async def refresh_topology_addresses(self):
+        if self.topology_gate is None:
+            return
+        payload = read_runtime_dp_addresses(self.runtime_dp_addresses_file)
+        addresses = payload["dp_addresses"]
+        if addresses != self.grpc_client.dp_addresses:
+            actual = await self.grpc_client.update_parallel_topology_addresses(
+                payload["tp_size"], payload["dp_size"]
+            )
+            if actual != addresses:
+                raise ValueError(
+                    "shared topology addresses disagree with configured world"
+                )
+            self.frontend_server.update_backend_addresses(actual)
+
+    async def _wait_backend_health_ready_impl(self) -> None:
+        """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
+        if self.frontend_server.is_embedding:
+            return
+        timeout_s = 3600
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                response = await self.grpc_client.post_request("health_check", {})
+                if response.get("status") == "ok":
+                    logging.info(
+                        "Backend health_check ready, starting frontend rank_id=%s frontend_server_id=%s",
+                        self.server_config.rank_id,
+                        self.server_config.frontend_server_id,
+                    )
+                    return
+            except Exception as e:
+                logging.debug(
+                    "Backend not ready, starting frontend rank_id=%s frontend_server_id=%s: %s",
+                    self.server_config.rank_id,
+                    self.server_config.frontend_server_id,
+                    e,
+                )
+            await asyncio.sleep(1)
+        raise RuntimeError(
+            "Backend health_check did not become ready within %ds" % timeout_s
+        )
+
+    def start(self):
+        self.frontend_server.start()
+        app = self.create_app()
+
+        loop = "auto"
+        if threading.current_thread() != threading.main_thread():
+            # NOTE: asyncio
+            loop = "none"
+            auto_loop_setup()
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        logging.info(
+            f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}, server_id = {self.server_config.frontend_server_id}, separated_frontend = {self.separated_frontend}"
+        )
+        sock.bind(("0.0.0.0", self.server_config.server_port))
+        sock.listen()
+        fd = sock.fileno()
+        timeout_keep_alive = self.server_config.timeout_keep_alive
+
+        config = Config(
+            app,
+            fd=fd,
+            loop=loop,
+            log_config=get_uvicorn_logging_config(),
+            timeout_keep_alive=timeout_keep_alive,
+            h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
+        )
+        logging.info(
+            f"Starting Uvicorn server on port {self.server_config.server_port} with timeout_keep_alive={timeout_keep_alive}"
+        )
+        try:
+            server = GracefulShutdownServer(config)
+            server.set_server(self.frontend_server)
+            # freeze all current tracked objects to reduce gc cost
+            gc.collect()
+            gc.freeze()
+            server.run()
+        except BaseException as e:
+            raise e
+
+    def create_app(self):
+        middleware = [
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+        ]
+        app = FastAPI(middleware=middleware)
+        if self.topology_gate is not None:
+            app.add_middleware(
+                PrefixTopologyMiddleware,
+                gate=self.topology_gate,
+                refresh=self.refresh_topology_addresses,
+            )
+
+        @app.on_event("startup")
+        async def startup():
+            # PD 不分离时在 Uvicorn 的 loop 里等后端就绪，channel 在此 loop 创建并一直复用
+            if not self.separated_frontend:
+                await self._wait_backend_health_ready_impl()
+            RunVar("_default_thread_limiter").set(
+                CapacityLimiter(
+                    self.frontend_server._global_controller.max_concurrency * 2
+                )
+            )
+
+        async def check_all_health():
+            if not self.frontend_server.check_health():
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="inference service is not ready",
+                )
+
+        @app.post("/frontend_health")
+        @app.get("/frontend_health")
+        async def frontend_health():
+            return "ok"
+
+        @app.get("/health")
+        @app.post("/health")
+        @app.get("/GraphService/cm2_status")
+        @app.post("/GraphService/cm2_status")
+        @app.get("/SearchService/cm2_status")
+        @app.post("/SearchService/cm2_status")
+        @app.get("/status")
+        @app.post("/status")
+        @app.post("/health_check")
+        async def health_check():
+            if self.separated_frontend:
+                await check_all_health()
+                return "ok"
+            if self.frontend_server.is_embedding:
+                return await async_request_server(
+                    "post", self.server_config.http_port, "health_check", {}
+                )
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
+
+        @app.get("/")
+        async def health():
+            if self.separated_frontend:
+                await check_all_health()
+                return {"status": "home"}
+            response = await self.grpc_client.post_request("health_check", {})
+            if response.get("status", "") != "ok":
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": f" HTTP health check failed"},
+                )
+            return "ok"
+
+        @app.get("/cache_status")
+        @app.post("/cache_status")
+        @app.get("/rtp_llm/cache_status")
+        @app.post("/rtp_llm/cache_status")
+        async def cache_status(
+            request: Request, data: Optional[Dict[Any, Any]] = Body(None)
+        ):
+            await self.refresh_topology_addresses()
+            query_params = (
+                dict(request.query_params) if request.method == "GET" else (data or {})
+            )
+
+            logging.info(f"cache_status request {data}")
+            response = await self.grpc_client.post_request("cache_status", query_params)
+            if "error" not in response:
+                response["frontend_available_concurrency"] = (
+                    self.frontend_server._global_controller.get_available_concurrency()
+                )
+            logging.info(f"cache_status response {response}")
+            if "error" in response:
+                return ORJSONResponse(
+                    status_code=500,
+                    content=response,
+                )
+            return response
+
+        @app.get("/worker_status")
+        @app.post("/worker_status")
+        @app.get("/rtp_llm/worker_status")
+        @app.post("/rtp_llm/worker_status")
+        async def worker_status(
+            request: Request, data: Optional[Dict[Any, Any]] = Body(None)
+        ):
+            await self.refresh_topology_addresses()
+            query_params = (
+                dict(request.query_params) if request.method == "GET" else (data or {})
+            )
+            response = await self.grpc_client.post_request(
+                "worker_status", query_params
+            )
+            if "error" not in response:
+                response["frontend_available_concurrency"] = (
+                    self.frontend_server._global_controller.get_available_concurrency()
+                )
+                response["frontend_concurrency_limit"] = (
+                    self.frontend_server._global_controller.max_concurrency
+                )
+            else:
+                return ORJSONResponse(
+                    status_code=500,
+                    content=response,
+                )
+            return response
+
+        @app.get("/v1/models")
+        async def list_models():
+            assert self.frontend_server._openai_endpoint != None
+            return await self.frontend_server._openai_endpoint.list_models()
+
+        # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
+        @app.post("/set_log_level")
+        async def set_log_level(req: Union[str, Dict[Any, Any]]):
+            result = await self.grpc_client.post_request("set_log_level", req)
+            return result
+
+        # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3, "enable_all_rank": false}'
+        @app.post("/rtp_llm/start_profile")
+        @app.post("/start_profile")
+        async def start_profile(req: Union[str, Dict[Any, Any]] = Body(default={})):
+            result = await self.grpc_client.post_request("start_profile", req)
+            return result
+
+        # request format: {"mode": "NONE", "update_time": 5000}
+        @app.post("/update_eplb_config")
+        async def update_eplb_config(req: Union[str, Dict[Any, Any]]):
+            result = await self.grpc_client.post_request("update_eplb_config", req)
+            return result
+
+        @app.post("/")
+        async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+            # compat for huggingface-pipeline request endpoint
+            if topology_switching and self.topology_gate is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="parallel topology switch in progress",
+                )
+            global active_requests
+            active_requests.increment()
+            try:
+                if self.frontend_server.is_embedding:
+                    return await self.frontend_server.embedding(req, raw_request)
+                else:
+                    return await self.frontend_server.inference(req, raw_request)
+            finally:
+                active_requests.decrement()
+
+        @app.post("/chat/completions")
+        @app.post("/v1/chat/completions")
+        async def chat_completion(
+            request: ChatCompletionRequest, raw_request: RawRequest
+        ):
+            if topology_switching and self.topology_gate is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="parallel topology switch in progress",
+                )
+            global active_requests
+            active_requests.increment()
+            try:
+                return await self.frontend_server.chat_completion(request, raw_request)
+            finally:
+                active_requests.decrement()
+
+        @app.post("/v1/batch/chat/completions")
+        async def batch_chat_completion(
+            request: BatchChatCompletionRequest, raw_request: RawRequest
+        ):
+            if topology_switching and self.topology_gate is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="parallel topology switch in progress",
+                )
+            global active_requests
+            active_requests.increment()
+            try:
+                return await self.frontend_server.batch_chat_completion(
+                    request, raw_request
+                )
+            finally:
+                active_requests.decrement()
+
+        @app.post("/batch_infer")
+        async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+            if topology_switching and self.topology_gate is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="parallel topology switch in progress",
+                )
+            global active_requests
+            active_requests.increment()
+            try:
+                if isinstance(req, str):
+                    req = json.loads(req)
+                return await self.frontend_server.batch_infer(req, raw_request)
+            finally:
+                active_requests.decrement()
+
+        @app.post("/update_scheduler_info")
+        async def update_scheduler_info(
+            req: Union[str, Dict[Any, Any]], raw_request: RawRequest
+        ):
+            try:
+                parsed_req = json.loads(req) if isinstance(req, str) else req
+            except ValueError:
+                parsed_req = None
+            if (
+                isinstance(parsed_req, dict)
+                and parsed_req.get("action") == "switch_parallel_topology"
+            ):
+                return await switch_parallel_topology(parsed_req, raw_request)
+            result = await self.grpc_client.post_request("update_scheduler_info", req)
+            return result
+
+        # request format: {"tp_size": 8, "dp_size": 1, "timeout_ms": 300000}
+        @app.post("/switch_parallel_topology")
+        @app.post("/rtp_llm/switch_parallel_topology")
+        async def switch_parallel_topology(
+            req: Union[str, Dict[Any, Any]], raw_request: RawRequest
+        ):
+            global topology_switching
+            writer = self.grpc_client.topology_writer
+            if writer is not None:
+                if not writer.authorized(raw_request.headers.get("Authorization")):
+                    raise HTTPException(status_code=403, detail="forbidden")
+            try:
+                parsed_req = (
+                    json.loads(req) if isinstance(req, str) else dict(req or {})
+                )
+                if writer is not None:
+                    writer.validate(parsed_req)
+            except (ValueError, TypeError) as error:
+                raise HTTPException(
+                    status_code=400, detail="invalid immutable topology request"
+                ) from error
+            async with self.topology_switch_lock:
+                if writer is not None:
+                    identity = writer.validate(parsed_req)
+                    try:
+                        async with self.topology_gate.switch(
+                            identity, parsed_req.get("timeout_ms", 300000)
+                        ):
+                            result = await execute_topology_switch(parsed_req, writer)
+                            self.topology_gate.finish(identity)
+                            return result
+                    except PrefixTopologyConflict as error:
+                        raise HTTPException(
+                            status_code=409, detail=str(error)
+                        ) from error
+                    except (OSError, ValueError, TimeoutError) as error:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="shared topology drain is unconfirmed",
+                        ) from error
+                return await execute_topology_switch(parsed_req, writer)
+
+        async def execute_topology_switch(req, writer):
+            global topology_switching
+            topology_switching = True
+            completed = False
+            try:
+                timeout_ms = 300000
+                if isinstance(req, str):
+                    try:
+                        timeout_ms = int(json.loads(req).get("timeout_ms", timeout_ms))
+                    except Exception:
+                        pass
+                elif isinstance(req, dict):
+                    timeout_ms = int(req.get("timeout_ms", timeout_ms))
+                deadline = time.monotonic() + max(timeout_ms, 0) / 1000.0
+                while active_requests.get() > 0:
+                    if timeout_ms > 0 and time.monotonic() > deadline:
+                        raise HTTPException(
+                            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                            detail="timeout waiting active requests to finish before topology switch",
+                        )
+                    await asyncio.sleep(0.005)
+                result = await self.grpc_client.post_request(
+                    "switch_parallel_topology", req
+                )
+                if writer is not None and result.get("status") == "cancelled":
+                    completed = True
+                    return result
+                if writer is not None and result.get("error"):
+                    raise RuntimeError("managed topology remains unconfirmed")
+                if not result.get("error"):
+                    if isinstance(req, str):
+                        parsed_req = json.loads(req)
+                    else:
+                        parsed_req = dict(req or {})
+                    new_dp_addresses = (
+                        await self.grpc_client.update_parallel_topology_addresses(
+                            int(parsed_req["tp_size"]), int(parsed_req["dp_size"])
+                        )
+                    )
+                    write_runtime_dp_addresses(
+                        self.runtime_dp_addresses_file,
+                        new_dp_addresses,
+                        int(parsed_req["tp_size"]),
+                        int(parsed_req["dp_size"]),
+                    )
+                    self.frontend_server.update_backend_addresses(new_dp_addresses)
+                    if writer is not None:
+                        result = await writer.admit(parsed_req)
+                    completed = True
+                return result
+            except Exception as error:
+                if writer is not None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "error": "topology_unconfirmed",
+                            "switch_id": req["switch_id"],
+                        },
+                    ) from error
+                raise
+            finally:
+                if writer is None or completed:
+                    topology_switching = False
+
+        @app.post("/chat/render")
+        @app.post("/v1/chat/render")
+        async def chat_render(request: ChatCompletionRequest, raw_request: RawRequest):
+            global active_requests
+            active_requests.increment()
+            try:
+                return await self.frontend_server.chat_render(request, raw_request)
+            finally:
+                active_requests.decrement()
+
+        # example {"prompt": "abcde"}
+        @app.post("/tokenizer/encode")
+        async def tokenizer_encode(req: Union[str, Dict[Any, Any]]):
+            return self.frontend_server.tokenizer_encode(req)
+
+        # example {"prompt": "abcde"}
+        # example openai_request
+        @app.post("/tokenize")
+        async def encode(req: Union[str, Dict[Any, Any]]):
+            return self.frontend_server.tokenize(req)
+
+        if self.frontend_server.is_embedding:
+            # embedding
+            @app.post("/v1/embeddings/similarity")
+            @app.post("/v1/reranker")
+            @app.post("/v1/classifier")
+            @app.post("/v1/embeddings")
+            async def embedding(request: Dict[str, Any], raw_request: RawRequest):
+                return await self.frontend_server.embedding(request, raw_request)
+
+            @app.post("/v1/embeddings/dense")
+            async def embedding_dense(request: Dict[str, Any], raw_request: RawRequest):
+                request[TYPE_STR] = EmbeddingType.DENSE
+                return await self.frontend_server.embedding(request, raw_request)
+
+            @app.post("/v1/embeddings/sparse")
+            async def embedding_sparse(
+                request: Dict[str, Any], raw_request: RawRequest
+            ):
+                request[TYPE_STR] = EmbeddingType.SPARSE
+                return await self.frontend_server.embedding(request, raw_request)
+
+            @app.post("/v1/embeddings/colbert")
+            async def embedding_colbert(
+                request: Dict[str, Any], raw_request: RawRequest
+            ):
+                request[TYPE_STR] = EmbeddingType.COLBERT
+                return await self.frontend_server.embedding(request, raw_request)
+
+        return app

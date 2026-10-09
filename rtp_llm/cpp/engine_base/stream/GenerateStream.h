@@ -1,0 +1,650 @@
+#pragma once
+
+#include "absl/status/statusor.h"
+#include "autil/TimeUtility.h"
+#include "autil/SynchronizedQueue.h"
+#include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
+#include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
+#include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <iterator>
+#include <mutex>
+#include <optional>
+
+namespace rtp_llm {
+
+// WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
+
+struct StreamUpdateInfo {
+    const torch::Tensor new_tokens;
+    int                 num_new_tokens;
+    const torch::Tensor hidden_states;
+    const torch::Tensor logits;
+    const torch::Tensor softmax_probs;
+    const torch::Tensor cum_log_probs;
+    const torch::Tensor all_probs;
+    const torch::Tensor loss;
+    const torch::Tensor src_batch_indices;
+    // for mtp
+    const torch::Tensor all_hidden_states;
+    bool                update_remote_generate = true;
+    bool                force_update_info      = false;
+};
+
+struct StreamSpecUpdateInfo {
+    const torch::Tensor new_tokens;
+    int                 num_new_tokens;
+
+    int                 draft_token;
+    const torch::Tensor draft_hidden_states;
+    const torch::Tensor draft_token_probs;
+
+    bool update_remote_generate = true;
+    bool force_update_info      = false;
+};
+
+struct SpeculativeExecutorStreamOutput {
+public:
+    std::string debugString() const {
+        std::stringstream debug_string;
+        debug_string << "SpeculativeExecutorStreamOutput { propose_step : " << propose_step;
+        if (tokens.defined()) {
+            debug_string << ", tokens: tensor[" << tokens.numel() << "]";
+        }
+        if (hidden_states.defined()) {
+            debug_string << ", hidden_states: tensor[" << hidden_states.numel() << "]";
+        }
+        if (all_probs.defined()) {
+            debug_string << ", all_probs: tensor[" << all_probs.numel() << "]";
+        }
+        debug_string << "}";
+        return debug_string.str();
+    }
+
+public:
+    size_t        propose_step = 0;
+    torch::Tensor tokens;  // selected tokens
+    torch::Tensor hidden_states;
+    torch::Tensor all_probs;
+
+    // hold tensors from grpc
+    std::vector<torch::Tensor> tensors_holder;
+};
+using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
+
+class GenerateStream;
+
+using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
+
+class GenerateStream: public std::enable_shared_from_this<GenerateStream> {
+public:
+    enum class AdmissionPhase {
+        RECEIVED,
+        KV_ALLOCATED,
+        RUNNING,
+        FINISHED,
+    };
+
+    static constexpr uint64_t STREAM_MAGIC = 0xA11CE5DEADBEEF01ULL;
+    GenerateStreamPtr         sharedThis() {
+        // stream construct happen with make_shared, and hold in scheduler
+        return shared_from_this();
+    }
+
+    GenerateStream(const std::shared_ptr<GenerateInput>& query,
+                   const ModelConfig&                    model_config,
+                   const RuntimeConfig&                  runtime_config,
+                   const ResourceContext&                resource_context,
+                   kmonitor::MetricsReporterPtr          metrics_reporter,
+                   size_t                                extra_reserve_token_num = 0,
+                   bool                                  pert_test               = false);
+    virtual ~GenerateStream() {
+        reportMetric();
+        releaseResource();
+        stream_magic_ = 0;
+    }
+
+    bool isStreamAlive() const {
+        return stream_magic_ == STREAM_MAGIC;
+    }
+
+public:
+    void setIsFakeStream(bool is_fake) {
+        is_fake_stream_ = is_fake;
+    }
+
+    bool isFakeStream() const {
+        return is_fake_stream_;
+    }
+
+    virtual ErrorResult<GenerateOutputs> nextOutput() = 0;
+    virtual bool                         hasOutput() {
+        return false;
+    }
+
+    virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
+    void         update(const StreamUpdateInfo& update_info);
+    void         specUpdate(const StreamSpecUpdateInfo& update_info);
+    bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
+
+    virtual size_t scoreLen() const {
+        return score_len_ == 0 ? 1 : score_len_;
+    }
+
+    void setScoreLen(size_t score_len) {
+        score_len_ = score_len;
+    }
+
+    // Only used in C++ world.
+    int                  reuseBlockSize() const;
+    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
+    virtual absl::Status initKVBlock();
+    virtual absl::Status incrKVBlock();
+    virtual void         releaseResource();
+    int                  nextNeedBlockNums(int reserve_step) const;
+    void                 setNeedReleaseResource(bool need_release_resource);
+    bool                 hasCacheKeys() const;
+    const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
+
+    std::shared_ptr<GenerateInput>   generateInput() const;
+    std::shared_ptr<GenerateConfig>& generateConfig() const;
+    std::vector<int>                 textTokensMask() const;
+    bool                             isStreaming() const;
+    int64_t                          streamId() const;
+    std::string                      adapterName() const;
+    rtp_llm::SpecialTokens           specialTokens() const;
+
+    int batchSize(int output_len) const;
+    int currentBatchSize() const;
+    int nextBatchSize() const;
+    int maxBatchSize() const;
+
+    int  numBeams(int output_len) const;
+    int  currentNumBeams() const;
+    int  nextNumBeams() const;
+    int  maxNumBeams() const;
+    bool hasNumBeams() const;
+
+    bool needTilingForSampling() const;
+
+    int    numReturnSequences() const;
+    bool   calculateLoss() const;
+    bool   calculateSoftmaxProbs() const;
+    bool   returnLogits() const;
+    bool   returnCumLogProbs() const;
+    bool   genTimeline() const;
+    int    profileStep() const;
+    void   setGenTimeline(bool gen_timeline);
+    bool   updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
+    size_t maxSeqLen() const;
+    int    inputLength() const;
+    int    seqLength() const;
+    // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
+    // for checking EOS and stop words
+    void    setSeqLength(int seq_length);
+    int     seqSizePerBlock() const;
+    int     contextLength() const;
+    int     prefixLength() const;
+    int     reuseLength() const;
+    int     initialReuseLength() const;
+    size_t  maxTokenNum() const;
+    void    setReuseLength(int reuse_length);
+    void    setLocalReuseLength(int length);
+    void    setRemoteReuseLength(int length);
+    int     localReuseLength() const;
+    int     remoteReuseLength() const;
+    void    setMemoryReuseLength(int length);
+    int     memoryReuseLength() const;
+    void    setInitialReuseLength(int initial_reuse_length);
+    void    incLastOutputPos();
+    void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
+    int64_t prefillTotalReuseLen() const;
+    int64_t prefillLocalReuseLen() const;
+    int64_t prefillRemoteReuseLen() const;
+    int64_t prefillMemoryReuseLen() const;
+
+    bool                 isContextStream() const;
+    const torch::Tensor& cumLogProbs() const;
+
+    torch::Tensor                     completeTokenIds();
+    std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const {
+        return complete_token_ids_;
+    }
+    std::vector<int> completeTokenIdsVec(int batch_idx = 0);
+    int              currentExecuteTokenSize();
+    std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
+
+    void step();
+    void spStep();
+
+    std::vector<torch::Tensor> multimodalFeatures() const;
+    int                        multimodalFeaturesLength() const;
+    torch::Tensor              multimodalLocations() const;
+
+    int64_t getTimeoutMs() const;
+    void    checkTimeout();
+
+    void reportEvent(StreamEvents::EventType event,
+                     ErrorCode               error_code = ErrorCode::NONE_ERROR,
+                     const std::string&      error_msg  = "");
+    void reportEventWithoutLock(StreamEvents::EventType event,
+                                ErrorCode               error_code = ErrorCode::NONE_ERROR,
+                                const std::string&      error_msg  = "");
+
+    void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    bool         hasEvent(StreamEvents::EventType event) const;
+    virtual bool hasError() const;
+    ErrorInfo    statusInfo();
+    std::string  stopReason();
+
+    void        setReserveStep(size_t reserve_step);
+    StreamState moveToNext();
+
+    virtual StreamState getStatus() const;
+    AdmissionPhase      admissionPhase() const;
+    bool                cancelIfReceived(const std::string& reason);
+    bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
+    bool                isActive() const;    // Returns true if stream is active (no error and not finished)
+    bool                isSubGenerateDoneWithoutLock(int batch_id) const;
+
+    size_t iterCount() const;
+    size_t spIterCount() const;
+    void   setSpIterCount(int sp_iter_count);
+
+    const ResourceContext&      resourceContext() const;
+    void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    void                        setLoss(const torch::Tensor& loss);
+    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
+    const BatchKVCacheResource& kvCache() const;
+    BatchKVCacheResource&       kvCacheMutable();
+    BatchKVCacheResourcePtr     kvCachePtr();
+    size_t                      curBlocksNum() const;
+
+    bool needFinish();
+    bool needFinishBySPTokens();
+    void matchEosToken();
+    void matchEosToken(int batch_id);
+    void matchStopWordsList();
+    void matchStopWordsList(int batch_id);
+
+    void        setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
+    void        reportMetric();
+    std::string debugString() const;
+
+    void    resetBeginTime(int64_t begin_time_us);
+    int64_t beginTimeUs() const {
+        return begin_time_us_;
+    }
+
+    // for test
+    void          setIsContextStream(bool is_context_stream);
+    torch::Tensor getLoss();
+    torch::Tensor getLastHiddenStates() const;
+    void          setLastHiddenStates(torch::Tensor hidden_states) {
+        last_hidden_states_ = std::move(hidden_states);
+    };
+    torch::Tensor        getSoftmaxProbs();
+    StreamCacheResource& streamCacheResource();
+    void                 setPerfTest(bool perf_test_);
+    bool                 isPerfTest() const {
+        return perf_test_;
+    }
+
+    void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
+
+    void setReturnAllProbs(bool return_all_probs) {
+        return_all_probs_ = return_all_probs;
+    }
+
+    bool getReturnAllProbs() {
+        return return_all_probs_;
+    }
+
+    torch::Tensor generateContextPositionIds();
+
+    void generateNextPositionId(int32_t* now_pos);
+
+    torch::Tensor getContextPositionIds() const {
+        return context_position_ids_.has_value() ? context_position_ids_.value() : torch::Tensor();
+    }
+
+    void setContextPositionIds(torch::Tensor context_position_ids) {
+        context_position_ids_ = std::move(context_position_ids);
+    }
+
+    int64_t vocabSize() const {
+        return vocab_size_;
+    }
+
+    size_t outputTokenLen() const {
+        return seqLength() - inputLength();
+    }
+
+    void setReturnLastHiddenStates(bool flag) {
+        return_all_hidden_states_ = flag;
+    }
+
+    bool forceDisableSpRun() const {
+        return generate_input_->generate_config->force_disable_sp_run;
+    }
+
+    bool disableSpRun() const {
+        return hasNumBeams() || forceDisableSpRun();
+    }
+
+    bool needReturnHiddenStates() {
+        return return_all_hidden_states_;
+    }
+
+    bool waitForRemoteGenerate();
+    void holdKVCacheForPDSep();
+    void releaseKVCacheForPDSep();
+
+    std::vector<int> getLatestTokens(size_t token_num);
+
+    void incBatchWithPrefillTimes(int32_t times);
+    void incBatchWithPrefillLen(int32_t len);
+
+    std::shared_ptr<CompleteTokenIds> getCompleteTokenIds() const {
+        return complete_token_ids_;
+    }
+
+    void setAccepedBounsToken(bool acceped_bouns_token) {
+        acceped_bouns_token_ = acceped_bouns_token;
+    }
+
+    bool getAccepedBounsToken() {
+        return acceped_bouns_token_;
+    }
+
+    size_t spEditSearchIndex() const {
+        return sp_edit_search_index_;
+    }
+
+    void setSpEditRun(bool is_sp_edit_run) {
+        sp_edit_run_ = is_sp_edit_run;
+    }
+
+    void incSpEditSearchIndex(size_t accepted_num) {
+        if (sp_edit_run_) {
+            sp_edit_search_index_ += accepted_num;
+        }
+    }
+
+    bool spEditFirstTime() const {
+        return sp_edit_first_time_;
+    }
+
+    void setSpEditFirstTime(bool sp_edit_first_time) {
+        sp_edit_first_time_ = sp_edit_first_time;
+    }
+
+    void setProposeToken(const std::vector<int>& propose_token) {
+        propose_token_ = propose_token;
+    }
+
+    std::vector<int>& getProposeToken() {
+        return propose_token_;
+    }
+
+    void setContainProposeToken(bool contain_propose_token) {
+        contain_propose_token_ = contain_propose_token;
+    }
+
+    bool getContainProposeToken() {
+        return contain_propose_token_;
+    }
+
+    void setMtpTokenIndex(int mtp_token_index) {
+        mtp_token_index_ = mtp_token_index;
+    }
+
+    size_t getMtpTokenIndex() {
+        return mtp_token_index_;
+    }
+
+    size_t getProposeStep() const {
+        if (propose_stream_ && propose_stream_->sp_output_buffer_->propose_step > 0) {
+            return propose_stream_->sp_output_buffer_->propose_step;
+        }
+        return 0;
+    }
+
+    bool forceSpAccept() const {
+        return generate_input_->generate_config->force_sp_accept;
+    }
+
+    std::string traceId() const {
+        return generate_input_->generate_config->trace_id;
+    }
+
+    int batchGroupSize() const {
+        return generate_input_->batch_group_size;
+    }
+
+    int batchGroupTimeout() const {
+        return generate_input_->generate_config->batch_group_timeout.value_or(100);
+    }
+
+    bool forceBatch() const {
+        return generate_input_->generate_config->force_batch;
+    }
+    int64_t batchGroupId() const {
+        return generate_input_->batch_group_id;
+    }
+
+    int64_t enqueueTime() const {
+        return generate_input_->begin_time_us;
+    }
+
+    std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
+        return logits_processor_list_;
+    }
+
+    at::Generator getGenerator() {
+        return generator_;
+    }
+
+    torch::Tensor getProposeTokens() const {
+        if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens.defined()) {
+            return propose_stream_->sp_output_buffer_->tokens;
+        }
+        return torch::Tensor();
+    }
+
+    void setSPOutputBuffer(SpeculativeExecutorStreamOutputPtr sp_output_buffer) {
+        sp_output_buffer_ = sp_output_buffer;
+    }
+
+    SpeculativeExecutorStreamOutputPtr getSPOutputBuffer() {
+        return sp_output_buffer_;
+    }
+
+    GenerateStreamPtr getProposeStream() {
+        return propose_stream_;
+    }
+
+    bool containProposeStream() {
+        return propose_stream_ != nullptr;
+    }
+
+    bool containScorestream() {
+        return score_stream_ != nullptr;
+    }
+
+    GenerateStreamPtr getScoreStream() {
+        return score_stream_;
+    }
+
+    void setProposeStream(GenerateStreamPtr stream) {
+        propose_stream_ = stream;
+    }
+
+    void setScoreStream(GenerateStreamPtr stream) {
+        score_stream_ = stream;
+    }
+
+    bool reuseCache() const {
+        return generate_input_->generate_config->reuse_cache;
+    }
+
+    bool enableDeviceCache() const {
+        return generate_input_->generate_config->enable_device_cache;
+    }
+
+    bool enableMemoryCache() const {
+        return generate_input_->generate_config->enable_memory_cache;
+    }
+
+    bool enableRemoteCache() const {
+        return generate_input_->generate_config->enable_remote_cache;
+    }
+
+    int64_t deadlineMs() const {
+        auto deadline_ms = generate_input_->generate_config->timeout_ms + begin_time_us_ / 1000;
+        return deadline_ms;
+    }
+
+    std::pair<std::string, uint32_t> prefillAddr() const;
+    std::string                      uniqueKey() const {
+        return generate_input_->generate_config->unique_key;
+    }
+
+    int getPrefillTpSize() const {
+        return prefill_tp_size_;
+    }
+    void setPrefillTpSize(int prefill_tp_size) {
+        prefill_tp_size_ = prefill_tp_size;
+    }
+
+public:
+    struct TimeInfo {
+        int64_t begin_time_us;
+        int64_t wait_time_us;
+        int64_t first_token_time_us;
+        int64_t first_token_rt_us;
+    };
+    TimeInfo getTimeInfo();
+    bool     queryPdSep() const;
+
+protected:
+    void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
+    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void fillSubGenerateStatus(StreamState state);
+    void resizeSubGenerateStatus(size_t new_size);
+
+    void reportStreamMetrics();
+    void reportCacheReuseMetrics() const;
+
+protected:
+    uint64_t                              stream_magic_ = STREAM_MAGIC;
+    std::shared_ptr<GenerateInput>        generate_input_;
+    std::shared_ptr<GenerateStateMachine> generate_status_;
+    std::vector<StreamState>              sub_generate_status_;
+    int                                   max_seq_len_;
+    int64_t                               vocab_size_;
+    std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
+    int64_t                               begin_time_us_;
+    int64_t                               wait_time_us_ = 0;
+    std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
+    std::shared_ptr<bool>                 is_context_stream_;
+    size_t                                iter_count_           = 0;
+    size_t                                sp_iter_count_        = 0;
+    size_t                                last_output_pos_      = 0;
+    int                                   initial_reuse_length_ = 0;
+    int                                   reuse_length_         = 0;
+    int                                   local_reuse_length_   = 0;
+    int                                   remote_reuse_length_  = 0;
+    int                                   memory_reuse_length_  = 0;
+    int                                   reuse_mm_length_      = 0;
+    // prefill reuse info (PD-sep); read/write only under output_mutex_
+    int64_t prefill_total_reuse_len_  = 0;
+    int64_t prefill_local_reuse_len_  = 0;
+    int64_t prefill_remote_reuse_len_ = 0;
+    int64_t prefill_memory_reuse_len_ = 0;
+    // TOOD(xinfei.sxf) fix state
+    bool done_                  = false;
+    bool released_              = false;
+    bool need_release_resource_ = true;
+
+    bool return_all_probs_ = false;
+
+    bool last_block_aligned_ = false;
+
+    bool gen_timeline_ = false;
+
+    // The number of times this stream has been interfered by prefills
+    int32_t batch_with_prefill_times_ = 0;
+    int32_t batch_with_prefill_len_   = 0;
+
+    kmonitor::MetricsReporterPtr metrics_reporter_;
+    rtp_llm::SpecialTokens       special_tokens_;
+
+    // Shared ownership diamond:
+    //   GenerateStream owns both stream_cache_resource_ and generate_status_ (GenerateStateMachine).
+    //   generate_status_ also holds a shared_ptr to the same StreamCacheResource.
+    //
+    //   GenerateStream ──shared_ptr──> StreamCacheResource
+    //        │                               ^
+    //        └──shared_ptr──> GenerateStateMachine ──shared_ptr──┘
+    //
+    // This is intentional: GenerateStateMachine needs direct access to StreamCacheResource
+    // for state transitions (e.g., loading cache, releasing blocks). Both owners share the
+    // same instance via shared_ptr, so reference counting ensures correct lifetime management.
+    // No circular reference exists because neither StreamCacheResource nor GenerateStateMachine
+    // holds a back-reference to GenerateStream.
+
+    torch::Tensor                            cum_log_probs_;
+    torch::Tensor                            all_probs_;
+    torch::Tensor                            softmax_probs_;
+    torch::Tensor                            loss_;
+    torch::Tensor                            last_hidden_states_;
+    int                                      loss_index_ = 0;
+    std::shared_ptr<std::mutex>              mutex_;
+    std::shared_ptr<std::condition_variable> cv_;
+
+    GenerateStreamPtr propose_stream_ = nullptr;
+    GenerateStreamPtr score_stream_   = nullptr;
+
+    size_t                             propose_step_         = 0;
+    size_t                             score_len_            = 0;
+    size_t                             reserve_step_         = 0;
+    bool                               acceped_bouns_token_  = false;
+    int                                sp_edit_search_index_ = 0;
+    bool                               sp_edit_first_time_   = true;
+    bool                               sp_edit_run_          = false;
+    std::vector<int>                   propose_token_;
+    bool                               contain_propose_token_ = false;
+    int                                mtp_token_index_       = 0;
+    SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
+
+    bool return_all_hidden_states_ = false;
+
+    std::optional<torch::Tensor> context_position_ids_;
+    PositionIdsStyle             mm_position_ids_style_;
+
+    rtp_llm::DataType dtype_;
+    size_t            hidden_size_;
+
+    std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
+    at::Generator                       generator_;
+
+    // just for bool test
+    bool perf_test_ = false;
+    friend class StreamCacheResource;
+    bool is_fake_stream_ = false;
+
+    // prefill TP size queried from prefill server (used for asymmetric TP)
+    int prefill_tp_size_ = -1;
+};
+
+typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
+
+}  // namespace rtp_llm

@@ -1,0 +1,13 @@
+diff --git include/flashinfer/gemm/bmm_fp8.cuh include/flashinfer/gemm/bmm_fp8.cuh
+index 7778934..50ce7f9 100644
+--- include/flashinfer/gemm/bmm_fp8.cuh
++++ include/flashinfer/gemm/bmm_fp8.cuh
+@@ -45,7 +45,7 @@
+ #else
+ #define FLASHINFER_CUBLAS_CALL(EXPR)  \
+   {                                   \
+-    cublasStatus_t e = (EXPR);        \
++    auto e = (EXPR);           \
+     if (e != CUBLAS_STATUS_SUCCESS) { \
+       return e;                       \
+     }                                 \

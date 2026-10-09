@@ -1,0 +1,16 @@
+diff --git a/include/cutlass/cuda_host_adapter.hpp b/include/cutlass/cuda_host_adapter.hpp
+index 1c8f56a6..29981c4b 100644
+--- include/cutlass/cuda_host_adapter.hpp
++++ include/cutlass/cuda_host_adapter.hpp
+@@ -100,7 +100,7 @@ namespace cutlass {
+ 
+ #else // defined(CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL)
+ 
+-#if (__CUDACC_VER_MAJOR__ >= 12 && __CUDACC_VER_MINOR__ >= 5)
++#if false
+ 
+ #define CUTLASS_CUDA_DRIVER_WRAPPER_DECL(func, ver)             \
+   template <typename... Args>                                   \
+-- 
+2.19.1.6.gb485710b
+
